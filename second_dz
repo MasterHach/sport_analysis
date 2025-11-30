@@ -1,0 +1,176 @@
+import pandas as pd
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, RandomForestClassifier
+from sklearn.metrics import mean_squared_error
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder, LabelEncoder, FunctionTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.metrics import mean_absolute_error
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.feature_selection import SelectKBest, f_classif
+from catboost import CatBoostRegressor
+import numpy as np
+
+import warnings
+warnings.filterwarnings("ignore")
+
+train_df = pd.read_csv('train.csv')
+
+X = train_df.drop('price_doc', axis=1)
+y = train_df['price_doc']
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Поиск логических ошибок
+class ErrorFinder(BaseEstimator, TransformerMixin):
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, df):
+        #df = df.dropna(how='any')
+
+        #area_error = df[df['life_sq'] > df['full_sq']].index
+        #df = df.drop(area_error)
+        df['life_sq'] = np.where(df['life_sq'] > df['full_sq'], 
+                        df['full_sq'], 
+                        df['life_sq'])
+
+        #
+        #kitchen_error = df[df['kitch_sq'] > df['full_sq']].index
+        #df = df.drop(kitchen_error)
+        df['kitch_sq'] = np.where(df['kitch_sq'] > df['full_sq'], 
+                         df['full_sq'] * 0.2,  # предполагаем 20% от общей площади
+                         df['kitch_sq'])
+
+        #
+        #floor_error = df[df['floor'] > df['max_floor']].index
+        #df = df.drop(floor_error)
+        df['floor'] = np.where(df['floor'] > df['max_floor'], 
+                      df['max_floor'], 
+                      df['floor'])
+
+        #
+        #room_error = df[df['num_room'] <= 0].index
+        #df = df.drop(room_error)
+        df['num_room'] = np.where(df['num_room'] <= 0, 
+                         1, 
+                         df['num_room'])
+        
+        #
+        #df['build_year'] = df['build_year'].fillna(2000)
+        df['build_year'] = pd.to_numeric(df['build_year'], errors='coerce').astype('Int64')
+
+        # Удаление бесконечных значений
+        df = df.replace([np.inf, -np.inf], np.nan)
+        
+        return df
+    
+    
+#Удаление \ преобразование колонок и строк
+class ChangeColumns(BaseEstimator, TransformerMixin):
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, df):
+        df['timestamp'] = pd.to_datetime(df['timestamp'], format='%Y-%m-%d')
+        df['quarter'] = df['timestamp'].dt.quarter
+        df['year'] = df['timestamp'].dt.year
+
+        df['year'] = df['year'].astype(int)
+        df['quarter'] = df['quarter'].astype(int)
+
+        return df
+    
+class DeleteCols(BaseEstimator, TransformerMixin):
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, df):
+        df = df.drop(['id'], axis=1)
+        df = df.drop(['timestamp'], axis=1)
+
+        return df
+
+
+numeric_features = ['year', 'quarter', 'full_sq', 'life_sq', 'floor', 'state', 'max_floor', 'material', 'build_year', 'num_room', 'kitch_sq', 'full_all']
+categorical_features = ['sub_area']
+
+# Создаем пайплайн предобработки
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('num', SimpleImputer(strategy='median'), numeric_features),
+        ('cat', OneHotEncoder(handle_unknown='ignore'), categorical_features)
+    ])
+
+# # Функция для применения обработки ошибок
+# #anomaly_transformer = FunctionTransformer(preprocess_data)
+
+# Создаем полные пайплайны для разных моделей
+pipelines = {
+    'GradientBoost': Pipeline([
+        ('error_finder', ErrorFinder()),
+        ('structure_fix', ChangeColumns()),
+        ('deleting', DeleteCols()),
+        ('preprocessor', preprocessor),
+        ('model', GradientBoostingRegressor(n_estimators = 300, max_depth=6, min_samples_split=2,learning_rate=0.1,loss='squared_error'))
+    ]),
+    'CatBoost': Pipeline([
+        ('error_finder', ErrorFinder()),
+        ('structure_fix', ChangeColumns()),
+        ('deleting', DeleteCols()),
+        ('preprocessor', preprocessor),
+        ('model', CatBoostRegressor(iterations=900, learning_rate=0.1, depth=7, loss_function='MAE'))
+    ])
+}
+
+# param_grid = [
+# {
+#     'classifier': [LogisticRegression()],
+#     'classifier__C': [0.1, 1, 10],
+#     'feature_selection__k': [2, 3, 4, 5],
+#     'scaler': [StandardScaler(), None]
+# },
+# ]
+
+# pipeline = Pipeline([
+#     ('structure_fix', ChangeColumns()),
+#     ('error_finder', ErrorFinder()),
+#     ('preprocessor', preprocessor),
+#     ('feature_selection', SelectKBest(f_classif, k=5)), # Отбор 5 лучших признаков
+#     ('scaler', StandardScaler()),
+#     ('classifier', LogisticRegression())
+# ])
+
+# grid_search = GridSearchCV(pipeline, param_grid, cv=5, scoring='f1')
+# grid_search.fit(X_train, y_train)
+
+print("\n" + "="*50)
+print("ОБУЧЕНИЕ МОДЕЛЕЙ")
+print("="*50)
+
+results = {}
+
+for name, pipeline in pipelines.items():
+    print(f"\nОбучение {name}...")
+    
+    # Обучаем пайплайн
+    pipeline.fit(X_train, y_train)
+    
+    # Предсказания
+    y_pred = pipeline.predict(X_test)
+    
+    # Оценка
+    mae = mean_absolute_error(y_test, y_pred)
+    results[name] = mae
+    
+    print(f"{name} - MAE: {mae:,.0f}")
+
+# Сравнение результатов
+print("\n" + "="*50)
+print("СРАВНЕНИЕ МОДЕЛЕЙ")
+print("="*50)
+
+for name, mae in sorted(results.items(), key=lambda x: x[1]):
+    print(f"{name}: MAE = {mae:,.0f}")
